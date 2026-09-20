@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>ClipboardGuard.App</RootNamespace>
+    <Description>Task 8 — Composition root and pipeline orchestrator. Hooks the Windows clipboard via AddClipboardFormatListener and wires all engines together.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ClipboardGuard.Core\ClipboardGuard.Core.csproj" />
+    <ProjectReference Include="..\ClipboardGuard.SourceId\ClipboardGuard.SourceId.csproj" />
+    <ProjectReference Include="..\ClipboardGuard.Detection\ClipboardGuard.Detection.csproj" />
+    <ProjectReference Include="..\ClipboardGuard.Masking\ClipboardGuard.Masking.csproj" />
+    <ProjectReference Include="..\ClipboardGuard.Destination\ClipboardGuard.Destination.csproj" />
+    <ProjectReference Include="..\ClipboardGuard.Data\ClipboardGuard.Data.csproj" />
+    <ProjectReference Include="..\ClipboardGuard.UI\ClipboardGuard.UI.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>ClipboardGuard.Detection</RootNamespace>
+    <Description>Task 3 — Sensitive Data Detection Engine. Regex/pattern library covering all sensitive data categories from proposal §3.2.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ClipboardGuard.Core\ClipboardGuard.Core.csproj" />
+  </ItemGroup>
+
+</Project>

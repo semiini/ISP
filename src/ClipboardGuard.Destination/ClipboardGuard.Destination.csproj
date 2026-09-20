@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>ClipboardGuard.Destination</RootNamespace>
+    <Description>Task 6 — Destination Analysis Engine. Detects the foreground app on paste and classifies it per proposal §3.4.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ClipboardGuard.Core\ClipboardGuard.Core.csproj" />
+  </ItemGroup>
+
+</Project>

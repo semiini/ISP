@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>ClipboardGuard.Data</RootNamespace>
+    <Description>Task 5 — SQLite event logging. Implements EventLogger to persist ClipboardEvent records to a local SQLite database.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ClipboardGuard.Core\ClipboardGuard.Core.csproj" />
+    <!-- SQLite provider — used for ClipboardEvent persistence -->
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="9.*" />
+  </ItemGroup>
+
+</Project>

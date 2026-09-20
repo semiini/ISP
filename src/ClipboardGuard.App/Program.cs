@@ -16,3 +16,11 @@ namespace ClipboardGuard.App;
 //       b. Execute Allow/Block/Confirm action
 //       c. Invoke EventLogger       → persist ClipboardEvent
 //       d. Notify UI
+internal static class Program
+{
+    [STAThread]
+    private static void Main()
+    {
+        // Placeholder entry point — will be implemented in Task 8.
+    }
+}

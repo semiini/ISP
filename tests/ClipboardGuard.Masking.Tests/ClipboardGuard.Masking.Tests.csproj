@@ -23,6 +23,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\ClipboardGuard.Masking\ClipboardGuard.Masking.csproj" />
+    <ProjectReference Include="..\..\src\ClipboardGuard.Data\ClipboardGuard.Data.csproj" />
     <ProjectReference Include="..\..\src\ClipboardGuard.Core\ClipboardGuard.Core.csproj" />
   </ItemGroup>
 

@@ -1,4 +1,4 @@
-# ClipboardGuard
+# Clipboard Guard
 
 **Source-Aware & Destination-Aware Clipboard Protection System**
 

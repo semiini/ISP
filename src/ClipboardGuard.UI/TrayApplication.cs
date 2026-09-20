@@ -2,13 +2,25 @@ using ClipboardGuard.Core.Models;
 
 namespace ClipboardGuard.UI;
 
+/// <summary>What the user chose when asked about a paste.</summary>
+public enum PasteChoice
+{
+    /// <summary>Insert the real, unmasked value.</summary>
+    Original,
+
+    /// <summary>Insert the masked version.</summary>
+    Redacted,
+
+    /// <summary>Insert nothing; the clipboard keeps the masked copy.</summary>
+    Cancel
+}
+
 /// <summary>
 /// Task 7 — Windows Forms shell (proposal §4, UI Framework).
 /// <para>
-/// Owns the system-tray presence and every user-facing interruption:
-/// balloon alerts for <see cref="PolicyDecision.Mask"/> / <see cref="PolicyDecision.Block"/>,
-/// a modal confirmation for <see cref="PolicyDecision.Confirm"/>, and the settings screen.
-/// The pipeline (Task 8) runs it as its <see cref="ApplicationContext"/>.
+/// Owns the system-tray presence and every user-facing interruption: the three-way paste
+/// prompt shown when sensitive content is about to be pasted, the copy-time notification,
+/// and the settings screen. The pipeline (Task 8) runs it as its <see cref="ApplicationContext"/>.
 /// </para>
 /// </summary>
 public sealed class TrayApplication : ApplicationContext
@@ -40,42 +52,77 @@ public sealed class TrayApplication : ApplicationContext
     }
 
     /// <summary>
-    /// Shows a non-blocking tray balloon describing a Mask or Block decision.
-    /// Only the data types are named — never the sensitive values (README §2).
+    /// Asks the user how to paste sensitive content. Blocks until they choose.
+    /// Only data types are named — never the values themselves (README §2).
     /// </summary>
-    public void ShowAlert(PolicyDecision decision, DetectionResult detection, DestinationInfo destination)
+    /// <param name="recommended">
+    /// The §3.4 policy matrix result. It no longer acts on its own; it selects which button
+    /// is highlighted, so the safe choice is the default exactly where the policy is strictest.
+    /// </param>
+    public PasteChoice AskPasteChoice(
+        SourceInfo source,
+        DetectionResult detection,
+        DestinationInfo destination,
+        PolicyDecision recommended)
     {
-        string types = DescribeTypes(detection);
-        (string title, string body, ToolTipIcon icon) = decision switch
+        var original = new TaskDialogCommandLinkButton("Paste original",
+            "Insert the real value into this application.");
+        var redacted = new TaskDialogCommandLinkButton("Paste redacted",
+            "Insert the masked version instead.");
+        var cancel = new TaskDialogCommandLinkButton("Cancel",
+            "Paste nothing. The clipboard keeps the masked copy.");
+
+        var page = new TaskDialogPage
         {
-            PolicyDecision.Block => ("Paste blocked",
-                $"{types} was blocked from {destination.ProcessName} ({destination.Category}).",
-                ToolTipIcon.Error),
-            PolicyDecision.Mask => ("Content masked",
-                $"{types} was masked before pasting into {destination.ProcessName} ({destination.Category}).",
-                ToolTipIcon.Warning),
-            _ => ("ClipboardGuard", $"{decision}: {types} → {destination.ProcessName}.", ToolTipIcon.Info)
+            Caption       = "ClipboardGuard",
+            Heading       = $"Paste {DescribeTypes(detection)}?",
+            Text          = $"From {source.ProcessName} ({source.Category}) " +
+                            $"into {destination.ProcessName} ({destination.Category}, {destination.RiskLevel} risk).",
+            Icon          = recommended == PolicyDecision.Block ? TaskDialogIcon.Warning : TaskDialogIcon.Information,
+            Buttons       = [original, redacted, cancel],
+            DefaultButton = recommended switch
+            {
+                PolicyDecision.Allow => original,
+                PolicyDecision.Block => cancel,
+                _                    => redacted,
+            },
+            AllowCancel = true,
         };
 
-        _tray.ShowBalloonTip(5000, title, body, icon);
+        // A hidden top-most owner keeps the prompt above the app being pasted into —
+        // a background tray process cannot reliably steal the foreground on its own.
+        using var owner = new Form
+        {
+            ShowInTaskbar   = false,
+            FormBorderStyle = FormBorderStyle.None,
+            StartPosition   = FormStartPosition.Manual,
+            Location        = new Point(-32000, -32000),
+            Size            = new Size(1, 1),
+            TopMost         = true,
+        };
+        owner.Show();
+
+        try
+        {
+            var result = TaskDialog.ShowDialog(owner, page);
+            if (result == original) return PasteChoice.Original;
+            if (result == redacted) return PasteChoice.Redacted;
+            return PasteChoice.Cancel;
+        }
+        finally
+        {
+            owner.Close();
+        }
     }
 
     /// <summary>
-    /// Blocks until the user approves or denies a <see cref="PolicyDecision.Confirm"/> paste.
+    /// Tray balloon shown when a copy was masked, so the user understands why their
+    /// clipboard changed. Names data types only.
     /// </summary>
-    /// <returns><see langword="true"/> when the user allows the paste.</returns>
-    public bool Confirm(SourceInfo source, DetectionResult detection, DestinationInfo destination)
-    {
-        string message =
-            $"{DescribeTypes(detection)} is about to be pasted.\n\n" +
-            $"From:  {source.ProcessName}  ({source.Category}, {source.RiskLevel} risk)\n" +
-            $"To:    {destination.ProcessName}  ({destination.Category}, {destination.RiskLevel} risk)\n\n" +
-            "Allow this paste?";
-
-        return MessageBox.Show(message, "ClipboardGuard — confirm paste",
-            MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2)
-            == DialogResult.Yes;
-    }
+    public void ShowCopyAlert(DetectionResult detection) =>
+        _tray.ShowBalloonTip(4000, "Sensitive data masked",
+            $"{DescribeTypes(detection)} was masked on the clipboard. " +
+            "You will be asked what to paste.", ToolTipIcon.Info);
 
     /// <summary>Opens the settings screen (modal), persisting changes into <see cref="Settings"/>.</summary>
     public void ShowSettings()
@@ -87,7 +134,7 @@ public sealed class TrayApplication : ApplicationContext
     /// <summary>Summarises a detection as data-type names only — no raw values.</summary>
     private static string DescribeTypes(DetectionResult detection)
     {
-        if (!detection.HasSensitiveData) return "Clipboard content";
+        if (!detection.HasSensitiveData) return "clipboard content";
 
         var types = detection.Matches.Select(m => m.DataType.ToString()).Distinct().ToList();
         return types.Count <= 3

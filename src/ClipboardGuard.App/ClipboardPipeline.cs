@@ -16,15 +16,16 @@ namespace ClipboardGuard.App;
 ///      → destination analysis → decision → log
 /// </code>
 /// <para>
-/// The copy half runs on <c>WM_CLIPBOARDUPDATE</c>: the clipboard is masked immediately,
-/// so sensitive content is already protected before any application can read it. The
-/// original text is held in memory only (never written to disk or into the event log) so
-/// that a later <see cref="PolicyDecision.Allow"/> can restore it.
+/// The copy half runs on <c>WM_CLIPBOARDUPDATE</c>: the clipboard is masked immediately, so
+/// the protected value is the one sitting there before any application can read it. The
+/// original is held in memory only — never on disk, never in the event log.
 /// </para>
 /// <para>
-/// The destination half runs when focus moves to another application. Each new destination
-/// is evaluated independently, so copying once and pasting into a text editor and then into
-/// an AI tool produces two decisions.
+/// The destination half runs on a real paste (Ctrl+V / Shift+Insert, intercepted by
+/// <see cref="PasteInterceptor"/>). Rather than deciding for the user, it runs destination
+/// analysis and then asks: paste the original, paste the redacted version, or cancel. The
+/// §3.4 matrix still runs — it chooses which answer is the default. This replaces the
+/// foreground-change trigger named in README Task 8; the stage order is unchanged.
 /// </para>
 /// </summary>
 internal sealed class ClipboardPipeline
@@ -35,6 +36,10 @@ internal sealed class ClipboardPipeline
     /// <summary>Window during which our own clipboard writes are ignored as re-entrant updates.</summary>
     private static readonly TimeSpan SelfWriteWindow = TimeSpan.FromSeconds(2);
 
+    /// <summary>How long the real value stays on the clipboard after a "paste original".</summary>
+    // ponytail: 300 ms reveal window, tune if slow apps read the clipboard late.
+    private static readonly TimeSpan RevealWindow = TimeSpan.FromMilliseconds(300);
+
     private readonly SourceIdentifier _sourceIdentifier;
     private readonly DetectionEngine _detection;
     private readonly MaskingEngine _masking;
@@ -43,7 +48,9 @@ internal sealed class ClipboardPipeline
     private readonly TrayApplication _tray;
 
     private PendingCopy? _pending;
-    private DateTime _suppressUntilUtc = DateTime.MinValue;
+    private bool _prompting;
+    private int _selfWrites;
+    private DateTime _selfWriteExpiryUtc = DateTime.MinValue;
 
     public ClipboardPipeline(
         SourceIdentifier sourceIdentifier,
@@ -61,6 +68,17 @@ internal sealed class ClipboardPipeline
         _tray             = tray;
     }
 
+    /// <summary>
+    /// Whether a paste should be intercepted right now. Read from inside the keyboard hook,
+    /// so it must stay a pure in-memory check — no I/O, no allocation, no UI.
+    /// </summary>
+    public bool HasPendingSensitiveCopy =>
+        !_prompting
+        && _tray.Settings.ProtectionEnabled
+        && _pending is { } pending
+        && pending.Detection.HasSensitiveData
+        && DateTime.UtcNow - pending.CopiedAtUtc <= PendingLifetime;
+
     // ─────────────────────────────────────────────────────────────────────────
     // Copy: source ID → detection → masking → clipboard update
     // ─────────────────────────────────────────────────────────────────────────
@@ -68,12 +86,7 @@ internal sealed class ClipboardPipeline
     /// <summary>Handles <c>WM_CLIPBOARDUPDATE</c>.</summary>
     public void OnClipboardUpdated()
     {
-        // Ignore the update our own masking write just caused.
-        if (DateTime.UtcNow < _suppressUntilUtc)
-        {
-            _suppressUntilUtc = DateTime.MinValue;
-            return;
-        }
+        if (ConsumeSelfWrite()) return;
 
         if (!_tray.Settings.ProtectionEnabled)
         {
@@ -101,90 +114,104 @@ internal sealed class ClipboardPipeline
         // [2] Sensitive data detection (§3.2), narrowed to the categories the user enabled
         var detection = ApplyCategoryFilter(_detection.Detect(content));
 
-        // [3] Masking + [4] clipboard update (§3.3) — applied up-front so the protected
-        //     value is on the clipboard before any destination can read it.
+        // [3] Masking + [4] clipboard update (§3.3) — applied up-front, which is what makes
+        //     Cancel free later: the safe value is already the one on the clipboard.
         string maskedText = string.Empty;
         if (detection.HasSensitiveData)
         {
             maskedText = _masking.Mask(content, detection);
-            WriteClipboard(() => _masking.TrySetClipboardText(maskedText));
+            Write(() => _masking.TrySetClipboardText(maskedText));
+
+            if (_tray.Settings.ShowAlerts) _tray.ShowCopyAlert(detection);
         }
 
         _pending = new PendingCopy
         {
-            Source       = source,
-            Detection    = detection,
-            RawText      = rawText,
-            MaskedText   = maskedText,
-            CopiedAtUtc  = content.CapturedAtUtc,
+            Source      = source,
+            Detection   = detection,
+            RawText     = rawText,
+            MaskedText  = maskedText,
+            CopiedAtUtc = content.CapturedAtUtc,
         };
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Paste: destination analysis → decision → log
+    // Paste: destination analysis → user choice → log
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// <summary>Handles a foreground-window change — the paste trigger (README Task 8).</summary>
-    public void OnForegroundChanged(int foregroundPid)
+    /// <summary>
+    /// Handles an intercepted paste keystroke. The keystroke has already been swallowed, so
+    /// every path except Cancel has to replay it.
+    /// </summary>
+    /// <param name="targetHwnd">The window that was about to receive the paste.</param>
+    public async Task OnPasteAttemptAsync(IntPtr targetHwnd)
     {
         var pending = _pending;
-        if (pending is null || !_tray.Settings.ProtectionEnabled) return;
+
+        // Nothing sensitive in flight — let the paste through untouched.
+        if (pending is null || !pending.Detection.HasSensitiveData || !_tray.Settings.ProtectionEnabled)
+        {
+            await PasteInterceptor.ReplayPasteAsync(targetHwnd);
+            return;
+        }
 
         // Expired copies drop their raw text rather than lingering in memory.
         if (DateTime.UtcNow - pending.CopiedAtUtc > PendingLifetime)
         {
             _pending = null;
+            await PasteInterceptor.ReplayPasteAsync(targetHwnd);
             return;
         }
 
-        // Still inside the copying application, or the same destination we just judged.
-        if (foregroundPid == pending.Source.Pid || foregroundPid == pending.LastEvaluatedPid) return;
-        pending.LastEvaluatedPid = foregroundPid;
+        // [5] Destination analysis + [6] policy (§3.4). Run before any UI is shown — the
+        //     target application is still the foreground window at this point.
+        var (destination, recommended) = _destination.Analyse(pending.Source, pending.Detection);
 
-        // [5] Destination analysis + [6] decision (§3.4)
-        var (destination, decision) = _destination.Analyse(pending.Source, pending.Detection);
-
-        bool? userConfirmed = null;
-        if (decision == PolicyDecision.Confirm)
+        PasteChoice choice;
+        _prompting = true;   // a Ctrl+V while the prompt is open must not stack another prompt
+        try
         {
-            userConfirmed = _tray.Confirm(pending.Source, pending.Detection, destination);
-            decision = userConfirmed.Value ? PolicyDecision.Allow : PolicyDecision.Block;
+            choice = _tray.AskPasteChoice(pending.Source, pending.Detection, destination, recommended);
+        }
+        finally
+        {
+            _prompting = false;
         }
 
-        Apply(decision, pending);
+        switch (choice)
+        {
+            case PasteChoice.Original:
+                Write(() => _masking.TrySetClipboardText(pending.RawText));
+                await PasteInterceptor.ReplayPasteAsync(targetHwnd);
 
-        if (_tray.Settings.ShowAlerts && decision is PolicyDecision.Mask or PolicyDecision.Block)
-            _tray.ShowAlert(decision, pending.Detection, destination);
+                // Put the masked value back so the real one is not left for other apps.
+                await Task.Delay(RevealWindow);
+                Write(() => _masking.TrySetClipboardText(pending.MaskedText));
+                break;
+
+            case PasteChoice.Redacted:
+                // The clipboard already holds the masked text from the copy stage.
+                await PasteInterceptor.ReplayPasteAsync(targetHwnd);
+                break;
+
+            case PasteChoice.Cancel:
+                // The keystroke was swallowed and the clipboard is untouched — nothing to undo.
+                break;
+        }
 
         // [7] Log (§3.3 clipboard management)
-        Log(pending, destination, decision, userConfirmed);
-
-        // Blocking clears the clipboard, so there is nothing left to paste anywhere else.
-        if (decision == PolicyDecision.Block) _pending = null;
+        Log(pending, destination, AsDecision(choice), choice != PasteChoice.Cancel);
     }
 
-    /// <summary>Puts the clipboard into the state the decision requires.</summary>
-    private void Apply(PolicyDecision decision, PendingCopy pending)
+    /// <summary>Maps the answer onto the fixed §3.4 <see cref="PolicyDecision"/> values.</summary>
+    private static PolicyDecision AsDecision(PasteChoice choice) => choice switch
     {
-        switch (decision)
-        {
-            // Restore the original — it was masked pre-emptively at copy-time.
-            case PolicyDecision.Allow when pending.Detection.HasSensitiveData:
-                WriteClipboard(() => _masking.TrySetClipboardText(pending.RawText));
-                break;
+        PasteChoice.Original => PolicyDecision.Allow,
+        PasteChoice.Redacted => PolicyDecision.Mask,
+        _                    => PolicyDecision.Block,
+    };
 
-            case PolicyDecision.Block:
-                WriteClipboard(ClearClipboard);
-                break;
-
-            // Mask: the clipboard already holds the masked text from the copy stage.
-            // Allow with no detections: nothing was changed.
-            default:
-                break;
-        }
-    }
-
-    private void Log(PendingCopy pending, DestinationInfo destination, PolicyDecision decision, bool? userConfirmed)
+    private void Log(PendingCopy pending, DestinationInfo destination, PolicyDecision decision, bool userConfirmed)
     {
         var now = DateTime.UtcNow;
         var evt = new ClipboardEvent
@@ -223,22 +250,37 @@ internal sealed class ClipboardPipeline
             : new DetectionResult { Matches = kept };
     }
 
-    /// <summary>Runs a clipboard write, suppressing the update it triggers.</summary>
-    private void WriteClipboard(Action write)
+    /// <summary>Runs a clipboard write and records that the update it raises is ours.</summary>
+    private void Write(Action write)
     {
-        _suppressUntilUtc = DateTime.UtcNow.Add(SelfWriteWindow);
+        _selfWrites++;
+        _selfWriteExpiryUtc = DateTime.UtcNow.Add(SelfWriteWindow);
         try
         {
             write();
         }
         catch (Exception ex)
         {
-            _suppressUntilUtc = DateTime.MinValue;
+            _selfWrites = Math.Max(0, _selfWrites - 1);
             Debug.WriteLine($"ClipboardGuard: clipboard write failed — {ex.Message}");
         }
     }
 
-    private static void ClearClipboard() => Clipboard.Clear();
+    /// <summary>
+    /// True when this update was raised by one of our own writes. Counted rather than
+    /// flagged, because "paste original" writes twice in quick succession.
+    /// </summary>
+    private bool ConsumeSelfWrite()
+    {
+        if (_selfWrites > 0 && DateTime.UtcNow < _selfWriteExpiryUtc)
+        {
+            _selfWrites--;
+            return true;
+        }
+
+        _selfWrites = 0;   // stale — a write we expected an update for never produced one
+        return false;
+    }
 
     private static string ReadClipboardText()
     {
@@ -255,8 +297,8 @@ internal sealed class ClipboardPipeline
     }
 
     /// <summary>
-    /// A copy awaiting destination analysis. <see cref="RawText"/> lives here, in memory,
-    /// only until the copy expires or is superseded.
+    /// A copy awaiting a paste. <see cref="RawText"/> lives here, in memory, only until the
+    /// copy expires or is superseded.
     /// </summary>
     private sealed class PendingCopy
     {
@@ -265,8 +307,5 @@ internal sealed class ClipboardPipeline
         public required string RawText { get; init; }
         public required string MaskedText { get; init; }
         public required DateTime CopiedAtUtc { get; init; }
-
-        /// <summary>Destination already judged for this copy — prevents duplicate prompts.</summary>
-        public int LastEvaluatedPid { get; set; }
     }
 }

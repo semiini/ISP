@@ -8,15 +8,30 @@ using ClipboardGuard.UI;
 namespace ClipboardGuard.App;
 
 /// <summary>
-/// Task 8 — composition root. Builds every engine once, hooks the clipboard and the
-/// foreground window, and runs the tray application's message loop. All pipeline
-/// behaviour lives in <see cref="ClipboardPipeline"/>.
+/// Task 8 — composition root. Builds every engine once, hooks the clipboard and the paste
+/// keystroke, and runs the tray application message loop. All pipeline behaviour lives in
+/// <see cref="ClipboardPipeline"/>.
 /// </summary>
 internal static class Program
 {
+    /// <summary>
+    /// Machine-wide name for the single-instance guard. A second instance would install a
+    /// second keyboard hook, so one Ctrl+V would raise two prompts and replay two pastes.
+    /// </summary>
+    private const string InstanceMutexName = @"Global\ClipboardGuard.SingleInstance";
+
     [STAThread]
     private static void Main()
     {
+        using var instanceLock = new Mutex(initiallyOwned: true, InstanceMutexName, out bool isFirstInstance);
+        if (!isFirstInstance)
+        {
+            MessageBox.Show(
+                "ClipboardGuard is already running — look for the shield icon in the system tray.",
+                "ClipboardGuard", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
         ApplicationConfiguration.Initialize();
 
         using var tray   = new TrayApplication();
@@ -32,8 +47,11 @@ internal static class Program
             tray);
 
         using var monitor = new ClipboardMonitor();
-        monitor.ClipboardUpdated  += (_, _)   => pipeline.OnClipboardUpdated();
-        monitor.ForegroundChanged += (_, pid) => pipeline.OnForegroundChanged(pid);
+        monitor.ClipboardUpdated += (_, _) => pipeline.OnClipboardUpdated();
+
+        using var interceptor = new PasteInterceptor(
+            () => pipeline.HasPendingSensitiveCopy,
+            pipeline.OnPasteAttemptAsync);
 
         tray.ViewLogRequested += async (_, _) => await ShowRecentEventsAsync(logger);
 

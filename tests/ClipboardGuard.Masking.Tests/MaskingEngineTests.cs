@@ -1,3 +1,5 @@
+using Xunit;
+
 namespace ClipboardGuard.Masking.Tests;
 
 /// <summary>

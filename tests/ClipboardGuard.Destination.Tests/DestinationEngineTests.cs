@@ -1,3 +1,5 @@
+using Xunit;
+
 namespace ClipboardGuard.Destination.Tests;
 
 /// <summary>

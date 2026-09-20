@@ -1,26 +1,68 @@
+using ClipboardGuard.Data;
+using ClipboardGuard.Destination;
+using ClipboardGuard.Detection;
+using ClipboardGuard.Masking;
+using ClipboardGuard.SourceId;
+using ClipboardGuard.UI;
+
 namespace ClipboardGuard.App;
 
-// Task 8 — Pipeline Integration / Composition Root
-// Implement per proposal §4.4 process-flow diagram and README Task 8.
-//
-// This is the application entry point. It must:
-//  1. Hook the Windows clipboard via user32.dll AddClipboardFormatListener.
-//  2. On WM_CLIPBOARDUPDATE:
-//       a. Invoke SourceIdentifier  → SourceInfo
-//       b. Build ClipboardContent
-//       c. Invoke DetectionEngine   → DetectionResult
-//       d. Resolve MaskingRules
-//       e. Invoke MaskingEngine     → maskedText (+ write back to clipboard)
-//  3. On paste detection (foreground-window change after copy):
-//       a. Invoke DestinationEngine → DestinationInfo + PolicyDecision
-//       b. Execute Allow/Block/Confirm action
-//       c. Invoke EventLogger       → persist ClipboardEvent
-//       d. Notify UI
+/// <summary>
+/// Task 8 — composition root. Builds every engine once, hooks the clipboard and the
+/// foreground window, and runs the tray application's message loop. All pipeline
+/// behaviour lives in <see cref="ClipboardPipeline"/>.
+/// </summary>
 internal static class Program
 {
     [STAThread]
     private static void Main()
     {
-        // Placeholder entry point — will be implemented in Task 8.
+        ApplicationConfiguration.Initialize();
+
+        using var tray   = new TrayApplication();
+        using var logger = new EventLogger();
+        logger.EnsureInitializedAsync().GetAwaiter().GetResult();
+
+        var pipeline = new ClipboardPipeline(
+            new SourceIdentifier(),
+            new DetectionEngine(),
+            new MaskingEngine(),
+            new DestinationEngine(),
+            logger,
+            tray);
+
+        using var monitor = new ClipboardMonitor();
+        monitor.ClipboardUpdated  += (_, _)   => pipeline.OnClipboardUpdated();
+        monitor.ForegroundChanged += (_, pid) => pipeline.OnForegroundChanged(pid);
+
+        tray.ViewLogRequested += async (_, _) => await ShowRecentEventsAsync(logger);
+
+        Application.Run(tray);
+    }
+
+    /// <summary>
+    /// Shows the most recent decisions from the SQLite log. Data types and decisions only —
+    /// the log never holds raw sensitive values.
+    /// </summary>
+    private static async Task ShowRecentEventsAsync(EventLogger logger)
+    {
+        try
+        {
+            var events = await logger.QueryAsync(limit: 20);
+            string body = events.Count == 0
+                ? "No clipboard events recorded yet."
+                : string.Join(Environment.NewLine, events.Select(e =>
+                    $"{e.DecisionTimestampUtc.ToLocalTime():g}  {e.Decision,-7}  " +
+                    $"{e.Source.ProcessName} → {e.Destination?.ProcessName ?? "(none)"}  " +
+                    $"[{e.Detection.Matches.Count} match(es), max {e.Detection.MaxRiskLevel}]"));
+
+            MessageBox.Show(body, "ClipboardGuard — recent events",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Could not read the event log:{Environment.NewLine}{ex.Message}",
+                "ClipboardGuard", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
     }
 }
